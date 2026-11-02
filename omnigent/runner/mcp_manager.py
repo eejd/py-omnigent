@@ -234,7 +234,7 @@ def _mcp_tool_schema(
         "type": "function",
         "name": namespaced_name,
         "description": tool_def.description or "",
-        "parameters": _normalize_input_schema(tool_def.inputSchema, namespaced_name),
+        "parameters": _normalize_input_schema(tool_def.input_schema, namespaced_name),
     }
 
 

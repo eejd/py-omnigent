@@ -23,12 +23,11 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
-from datetime import timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import urlparse
 
-import httpx
+import httpx2 as httpx
 from anyio.streams.memory import (
     MemoryObjectReceiveStream,
     MemoryObjectSendStream,
@@ -37,19 +36,17 @@ from cachetools import TTLCache
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
-from mcp.shared.exceptions import McpError
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import MCPError as McpError
 from mcp.shared.message import SessionMessage
 from mcp.types import (
     CONNECTION_CLOSED,
-    CallToolRequest,
-    CallToolRequestParams,
     CallToolResult,
-    ClientRequest,
     ContentBlock,
     ElicitRequestParams,
     ElicitResult,
     ImageContent,
+    InputRequiredResult,
     TextContent,
 )
 from mcp.types import Tool as McpToolDef
@@ -699,16 +696,18 @@ class McpServerConnection:
             self._call_serial += 1
             self._transport_error = None
             try:
-                result = await self._session.call_tool(name=name, arguments=arguments)
+                result = await self._session.call_tool(
+                    name=name, arguments=arguments, allow_input_required=True
+                )
             finally:
                 self._active_session_id = None
 
         # ── MRTR: detect InputRequiredResult ─────────────────────────
-        extras = getattr(result, "model_extra", {}) or {}
-        if extras.get("resultType") == "input_required":
+        if isinstance(result, InputRequiredResult):
+            payload = result.model_dump(by_alias=True, exclude_none=True)
             raise McpElicitationRequired(
-                input_requests=extras.get("inputRequests") or {},
-                request_state=extras.get("requestState", ""),
+                input_requests=payload.get("inputRequests") or {},
+                request_state=result.request_state or "",
                 tool_name=name,
                 arguments=arguments,
             )
@@ -721,8 +720,8 @@ class McpServerConnection:
                 session_id,
                 tool_name=f"{self.config.name}__{name}",
                 arguments=arguments,
-                result=result.model_dump(),
-                successful=not result.isError,
+                result=result.model_dump(by_alias=True),
+                successful=not result.is_error,
                 source="managed_mcp",
             )
         return _format_call_result(result)
@@ -760,11 +759,10 @@ class McpServerConnection:
         retry_params: dict[str, Any] = {
             "name": name,
             "arguments": arguments,
+            "input_responses": input_responses,
+            "request_state": request_state or None,
+            "allow_input_required": True,
         }
-        if input_responses is not None:
-            retry_params["inputResponses"] = input_responses
-        if request_state:
-            retry_params["requestState"] = request_state
 
         async with self._call_lock:
             self._active_session_id = session_id
@@ -773,25 +771,18 @@ class McpServerConnection:
             self._call_serial += 1
             self._transport_error = None
             try:
-                result = await self._session.send_request(
-                    ClientRequest(
-                        CallToolRequest(
-                            params=CallToolRequestParams(**retry_params),
-                        )
-                    ),
-                    CallToolResult,
-                )
+                result = await self._session.call_tool(**retry_params)
             finally:
                 self._active_session_id = None
 
         # Multi-round MRTR: the server may return another
         # InputRequiredResult on the retry. Raise so the Omnigent server
         # can surface the next elicitation round.
-        extras = getattr(result, "model_extra", {}) or {}
-        if extras.get("resultType") == "input_required":
+        if isinstance(result, InputRequiredResult):
+            payload = result.model_dump(by_alias=True, exclude_none=True)
             raise McpElicitationRequired(
-                input_requests=extras.get("inputRequests") or {},
-                request_state=extras.get("requestState", ""),
+                input_requests=payload.get("inputRequests") or {},
+                request_state=result.request_state or "",
                 tool_name=name,
                 arguments=arguments,
             )
@@ -861,9 +852,7 @@ class McpServerConnection:
                 # its own per-call timeout. Falls back to the MCP SDK
                 # default (no timeout) when config.timeout is None.
                 session_timeout = (
-                    timedelta(seconds=self.config.timeout)
-                    if self.config.timeout is not None
-                    else None
+                    float(self.config.timeout) if self.config.timeout is not None else None
                 )
                 session = ClientSession(
                     read_stream,
@@ -938,8 +927,8 @@ class McpServerConnection:
         tools = list(tools_result.tools)
         if self.discovery_limit is not None:
             seen_cursors: set[str] = set()
-            while tools_result.nextCursor and len(tools) < self.discovery_limit:
-                cursor = tools_result.nextCursor
+            while tools_result.next_cursor and len(tools) < self.discovery_limit:
+                cursor = tools_result.next_cursor
                 if cursor in seen_cursors:
                     raise ValueError("MCP discovery repeated a cursor")
                 seen_cursors.add(cursor)
@@ -1240,7 +1229,7 @@ class McpServerConnection:
         """
         Open a Streamable HTTP MCP transport.
 
-        Uses the ``streamablehttp_client`` from the MCP SDK, which
+        Uses the ``streamable_http_client`` from the MCP SDK, which
         sends JSON-RPC over HTTP POST with optional SSE streaming
         for server-initiated messages.
 
@@ -1252,16 +1241,17 @@ class McpServerConnection:
         :returns: A ``(read_stream, write_stream)`` tuple.
         """
         assert self.config.url is not None
-        read_stream, write_stream, _get_session_id = await stack.enter_async_context(
-            streamablehttp_client(
-                url=self.config.url,
+        client = await stack.enter_async_context(
+            self._make_recording_httpx_client(
                 headers=headers,
-                timeout=float(timeout) if timeout is not None else 30,
-                sse_read_timeout=float(timeout) if timeout is not None else 300,
-                # Record response-stream network failures the SDK
-                # would otherwise swallow — see _is_dead_session_timeout.
-                httpx_client_factory=self._make_recording_httpx_client,
+                timeout=httpx.Timeout(
+                    float(timeout) if timeout is not None else 30,
+                    read=float(timeout) if timeout is not None else 300,
+                ),
             )
+        )
+        read_stream, write_stream = await stack.enter_async_context(
+            streamable_http_client(url=self.config.url, http_client=client)
         )
         return read_stream, write_stream
 
@@ -1551,6 +1541,8 @@ def _is_connection_error(exc: BaseException) -> bool:
     :param exc: The exception to classify.
     :returns: ``True`` if the error is connection-related.
     """
+    if isinstance(exc, BaseExceptionGroup):
+        return bool(exc.exceptions) and all(_is_connection_error(e) for e in exc.exceptions)
     if isinstance(exc, _CONNECTION_ERROR_TYPES):
         return True
     if isinstance(exc, McpError):
@@ -1747,7 +1739,7 @@ def _format_call_result(result: CallToolResult) -> str:
     has_image = False
     for block in result.content:
         canonical = (
-            native_image_payload(block.data, block.mimeType)
+            native_image_payload(block.data, block.mime_type)
             if isinstance(block, ImageContent)
             else None
         )
@@ -1755,24 +1747,24 @@ def _format_call_result(result: CallToolResult) -> str:
             # Claude's bundled MCP schema takes optional fields as absent, not
             # null, so unset ``annotations``/``meta`` must be omitted rather
             # than serialized as ``null``.
-            content.append({**block.model_dump(mode="json", exclude_none=True), "data": canonical})
+            content.append({**block.model_dump(mode="json", by_alias=True, exclude_none=True), "data": canonical})
             has_image = True
         else:
             text = _format_content_block(block)
             legacy_parts.append(text)
             content.append(
-                block.model_dump(mode="json", exclude_none=True)
+                block.model_dump(mode="json", by_alias=True, exclude_none=True)
                 if isinstance(block, ImageContent)
                 and block.data
-                and block.mimeType.startswith("image/")
+                and block.mime_type.startswith("image/")
                 else {"type": "text", "text": text}
             )
     if has_image:
-        return encode_mcp_image_result(content, is_error=bool(result.isError))
+        return encode_mcp_image_result(content, is_error=bool(result.is_error))
     joined = "\n".join(legacy_parts)
     if not joined:
         joined = "(empty response)"
-    if result.isError:
+    if result.is_error:
         return f"Error: {joined}"
     return joined
 
@@ -1793,4 +1785,4 @@ def _format_content_block(block: ContentBlock) -> str:
     if isinstance(block, TextContent):
         return block.text
     # All ContentBlock variants are Pydantic BaseModels.
-    return json.dumps(block.model_dump())
+    return json.dumps(block.model_dump(by_alias=True))

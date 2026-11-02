@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 from pydantic import ValidationError
@@ -251,15 +252,15 @@ async def test_http_permission_failure_after_successful_discovery(registry, monk
     def upstream(request):
         assert request.headers["authorization"] == "Bearer private-test-token"
         if request.method == "GET":
-            return httpx.Response(405)
+            return httpx2.Response(405)
         if request.method == "DELETE":
-            return httpx.Response(200)
+            return httpx2.Response(200)
         message = json.loads(request.content)
         calls.append(message["method"])
         if "id" not in message:
-            return httpx.Response(202)
+            return httpx2.Response(202)
         if message["method"] == "tools/call":
-            return httpx.Response(403, text="insufficient scopes: private-test-token")
+            return httpx2.Response(403, text="insufficient scopes: private-test-token")
         result = (
             {
                 "protocolVersion": "2025-11-25",
@@ -269,13 +270,13 @@ async def test_http_permission_failure_after_successful_discovery(registry, monk
             if message["method"] == "initialize"
             else {"tools": [{"name": "read_ticket", "inputSchema": {"type": "object"}}]}
         )
-        return httpx.Response(200, json={"jsonrpc": "2.0", "id": message["id"], "result": result})
+        return httpx2.Response(200, json={"jsonrpc": "2.0", "id": message["id"], "result": result})
 
-    client_type = httpx.AsyncClient
+    client_type = httpx2.AsyncClient
     monkeypatch.setattr(
-        httpx,
+        httpx2,
         "AsyncClient",
-        lambda **kwargs: client_type(transport=httpx.MockTransport(upstream), **kwargs),
+        lambda **kwargs: client_type(transport=httpx2.MockTransport(upstream), **kwargs),
     )
     tools = await registry.execute("tracker", "alice", SimpleNamespace())
     assert [tool.name for tool in tools] == ["read_ticket"]

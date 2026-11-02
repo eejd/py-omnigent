@@ -19,10 +19,10 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer as FastMCP
 
 port = int(sys.argv[1])
-mcp = FastMCP("echo-http-test", host="127.0.0.1", port=port)
+mcp = FastMCP("echo-http-test")
 
 
 @mcp.tool()
@@ -59,4 +59,4 @@ async def slow_echo(text: str, delay_s: float) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    mcp.run(transport="streamable-http", host="127.0.0.1", port=port)

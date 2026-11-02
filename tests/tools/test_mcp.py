@@ -12,11 +12,11 @@ from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2 as httpx
 import pytest
 from cachetools import TTLCache
-from mcp.shared.exceptions import McpError
-from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, ImageContent, TextContent
+from mcp.shared.exceptions import MCPError as McpError
+from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, ImageContent, InputRequiredResult, TextContent
 from mcp.types import Tool as McpToolDef
 
 from omnigent.spec.types import MCPServerConfig, RetryPolicy
@@ -119,12 +119,12 @@ def _mock_mcp_transport(
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
     mock_ctx = AsyncMock()
-    # streamablehttp_client yields (read, write, get_session_id)
-    mock_ctx.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock(), MagicMock()))
+    # MCP2 yields the read and write streams.
+    mock_ctx.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
     mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
     with patch(
-        "omnigent.tools.mcp.streamablehttp_client",
+        "omnigent.tools.mcp.streamable_http_client",
         return_value=mock_ctx,
     ):
         with patch(
@@ -341,7 +341,7 @@ async def test_cached_connect_has_live_session() -> None:
         # Set up call_tool to return a mock result.
         mock_result = MagicMock()
         mock_result.content = [TextContent(type="text", text="cached ok")]
-        mock_result.isError = False
+        mock_result.is_error = False
         mock_session.call_tool.return_value = mock_result
 
         conn = McpServerConnection(config=config)
@@ -696,7 +696,7 @@ def test_format_call_result_text_content() -> None:
     block = TextContent(type="text", text="Hello world")
     result = MagicMock()
     result.content = [block]
-    result.isError = False
+    result.is_error = False
 
     assert _format_call_result(result) == "Hello world"
 
@@ -709,7 +709,7 @@ def test_format_call_result_multiple_blocks() -> None:
     block2 = TextContent(type="text", text="Line 2")
     result = MagicMock()
     result.content = [block1, block2]
-    result.isError = False
+    result.is_error = False
 
     assert _format_call_result(result) == "Line 1\nLine 2"
 
@@ -721,7 +721,7 @@ def test_format_call_result_error_prefix() -> None:
     block = TextContent(type="text", text="something went wrong")
     result = MagicMock()
     result.content = [block]
-    result.isError = True
+    result.is_error = True
 
     formatted = _format_call_result(result)
     assert formatted.startswith("Error: ")
@@ -737,7 +737,7 @@ def test_format_call_result_non_text_content() -> None:
     block = ImageContent(type="image", data=_TINY_PNG_BASE64, mimeType="image/png")
     result = MagicMock()
     result.content = [block]
-    result.isError = False
+    result.is_error = False
 
     formatted = _format_call_result(result)
     parsed = json.loads(formatted)
@@ -774,8 +774,8 @@ def test_format_call_result_malformed_image_keeps_valid_neighbor(
     assert decode_mcp_image_result(parsed) is not None
     assert mcp_response_from_tool_result(parsed) == {
         "content": [
-            valid.model_dump(mode="json", exclude_none=True),
-            {"type": "text", "text": json.dumps(malformed.model_dump())},
+            valid.model_dump(mode="json", by_alias=True, exclude_none=True),
+            {"type": "text", "text": json.dumps(malformed.model_dump(by_alias=True))},
             {"type": "text", "text": trailing},
         ],
         "isError": is_error,
@@ -789,7 +789,7 @@ def test_format_call_result_empty_content() -> None:
     """
     result = MagicMock()
     result.content = []
-    result.isError = False
+    result.is_error = False
 
     assert _format_call_result(result) == "(empty response)"
 
@@ -801,7 +801,7 @@ def test_format_call_result_empty_content_with_error() -> None:
     """
     result = MagicMock()
     result.content = []
-    result.isError = True
+    result.is_error = True
 
     assert _format_call_result(result) == "Error: (empty response)"
 
@@ -878,7 +878,7 @@ def test_is_connection_error_mcp_connection_closed() -> None:
     McpError with CONNECTION_CLOSED code is classified as a
     connection error.
     """
-    exc = McpError(
+    exc = McpError.from_error_data(
         ErrorData(
             code=CONNECTION_CLOSED,
             message="Connection closed",
@@ -892,7 +892,7 @@ def test_is_connection_error_mcp_other_code() -> None:
     McpError with a non-connection code (e.g. INVALID_PARAMS)
     is NOT classified as a connection error.
     """
-    exc = McpError(
+    exc = McpError.from_error_data(
         ErrorData(
             code=-32602,  # INVALID_PARAMS
             message="Invalid params",
@@ -932,7 +932,7 @@ def test_is_connection_error_httpx_timeout_not_transient() -> None:
 
 def _request_timeout_error() -> McpError:
     """Build the SDK's request-timeout McpError shape (code 408)."""
-    return McpError(
+    return McpError.from_error_data(
         ErrorData(
             code=int(httpx.codes.REQUEST_TIMEOUT),
             message="Timed out while waiting for response to ClientRequest. Waited 8.0 seconds.",
@@ -983,7 +983,7 @@ def test_dead_session_timeout_ignores_other_mcp_errors() -> None:
     """
     conn = McpServerConnection(config=_make_http_config())
     conn._session = None
-    exc = McpError(ErrorData(code=-32602, message="Invalid params"))
+    exc = McpError.from_error_data(ErrorData(code=-32602, message="Invalid params"))
     assert _is_dead_session_timeout(exc, conn) is False
     assert _is_dead_session_timeout(ValueError("bad"), conn) is False
 
@@ -1216,7 +1216,7 @@ async def test_call_tool_reconnects_on_connection_error(caplog: pytest.LogCaptur
         # Second call_tool (after reconnect) succeeds.
         ok_result = MagicMock()
         ok_result.content = [TextContent(type="text", text="recovered")]
-        ok_result.isError = False
+        ok_result.is_error = False
 
         mock_session.call_tool.side_effect = [
             EOFError("server died"),
@@ -1262,7 +1262,7 @@ async def test_call_tool_reconnects_on_httpx_network_error() -> None:
 
         ok_result = MagicMock()
         ok_result.content = [TextContent(type="text", text="recovered")]
-        ok_result.isError = False
+        ok_result.is_error = False
 
         mock_session.call_tool.side_effect = [
             httpx.ReadError("connection reset by peer"),
@@ -1295,14 +1295,14 @@ async def test_call_tool_reconnects_on_dead_session_timeout() -> None:
 
         ok_result = MagicMock()
         ok_result.content = [TextContent(type="text", text="recovered")]
-        ok_result.isError = False
+        ok_result.is_error = False
 
         def _die_mid_call(*args: object, **kwargs: object) -> MagicMock:
             if not mock_session.call_tool.await_count > 1:
                 # Lifecycle task death: session cleared, request
                 # times out with no response.
                 conn._session = None
-                raise McpError(
+                raise McpError.from_error_data(
                     ErrorData(
                         code=int(httpx.codes.REQUEST_TIMEOUT),
                         message=(
@@ -1347,14 +1347,14 @@ async def test_call_tool_reconnects_on_swallowed_transport_error_timeout(
 
         ok_result = MagicMock()
         ok_result.content = [TextContent(type="text", text="recovered")]
-        ok_result.isError = False
+        ok_result.is_error = False
 
         def _swallowed_reset(*args: object, **kwargs: object) -> MagicMock:
             if not mock_session.call_tool.await_count > 1:
                 # The SDK swallowed the reset: session stays live,
                 # only the httpx-layer recording betrays the fault.
                 conn._transport_error = httpx.ReadError("connection reset by peer")
-                raise McpError(
+                raise McpError.from_error_data(
                     ErrorData(
                         code=int(httpx.codes.REQUEST_TIMEOUT),
                         message=(
@@ -1401,7 +1401,7 @@ async def test_call_tool_timeout_with_live_session_not_retried() -> None:
         conn = McpServerConnection(config=config)
         await conn.connect()
 
-        mock_session.call_tool.side_effect = McpError(
+        mock_session.call_tool.side_effect = McpError.from_error_data(
             ErrorData(
                 code=int(httpx.codes.REQUEST_TIMEOUT),
                 message=(
@@ -1439,7 +1439,7 @@ async def test_call_tool_retries_when_reconnect_itself_fails() -> None:
 
         ok_result = MagicMock()
         ok_result.content = [TextContent(type="text", text="recovered")]
-        ok_result.isError = False
+        ok_result.is_error = False
 
         mock_session.call_tool.side_effect = [
             httpx.ReadError("blip starts"),
@@ -1480,7 +1480,7 @@ async def test_call_tool_does_not_reconnect_on_tool_error() -> None:
         conn = McpServerConnection(config=config)
         await conn.connect()
 
-        mock_session.call_tool.side_effect = McpError(
+        mock_session.call_tool.side_effect = McpError.from_error_data(
             ErrorData(
                 code=-32602,
                 message="Invalid params",
@@ -1588,7 +1588,7 @@ async def test_call_tool_sleeps_between_retries() -> None:
 
         ok_result = MagicMock()
         ok_result.content = [TextContent(type="text", text="ok")]
-        ok_result.isError = False
+        ok_result.is_error = False
 
         mock_session.call_tool.side_effect = [
             EOFError("attempt 1"),
@@ -1689,7 +1689,7 @@ async def test_connect_passes_timeout_to_client_session() -> None:
 
     mock_ctx = AsyncMock()
     mock_ctx.__aenter__ = AsyncMock(
-        return_value=(MagicMock(), MagicMock(), MagicMock()),
+        return_value=(MagicMock(), MagicMock()),
     )
     mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
@@ -1698,18 +1698,14 @@ async def test_connect_passes_timeout_to_client_session() -> None:
         side_effect=_capturing_session,
     ):
         with patch(
-            "omnigent.tools.mcp.streamablehttp_client",
+            "omnigent.tools.mcp.streamable_http_client",
             return_value=mock_ctx,
         ):
             conn = McpServerConnection(config=config)
             await conn.connect()
 
-    # timeout=60 must be converted to timedelta(seconds=60) for the
-    # MCP SDK's ClientSession read_timeout_seconds parameter.
-    assert captured_kwargs.get("read_timeout_seconds") == timedelta(seconds=60), (
-        "ClientSession must receive read_timeout_seconds as a "
-        "timedelta matching the config timeout"
-    )
+    # MCP2 accepts timeout values in seconds.
+    assert captured_kwargs.get("read_timeout_seconds") == 60.0
 
     await conn.close()
 
@@ -1752,7 +1748,7 @@ async def test_connect_passes_none_timeout_to_client_session() -> None:
 
     mock_ctx = AsyncMock()
     mock_ctx.__aenter__ = AsyncMock(
-        return_value=(MagicMock(), MagicMock(), MagicMock()),
+        return_value=(MagicMock(), MagicMock()),
     )
     mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
@@ -1761,7 +1757,7 @@ async def test_connect_passes_none_timeout_to_client_session() -> None:
         side_effect=_capturing_session,
     ):
         with patch(
-            "omnigent.tools.mcp.streamablehttp_client",
+            "omnigent.tools.mcp.streamable_http_client",
             return_value=mock_ctx,
         ):
             conn = McpServerConnection(config=config)
@@ -1797,12 +1793,8 @@ async def test_connect_http_passes_timeout_to_transport() -> None:
         conn = McpServerConnection(config=config)
         await conn.connect()
 
-    assert captured.transport_kwargs["timeout"] == 60.0, (
-        "transport timeout must equal the config timeout as float"
-    )
-    assert captured.transport_kwargs["sse_read_timeout"] == 60.0, (
-        "transport sse_read_timeout must equal the config timeout as float"
-    )
+    assert captured.transport_kwargs["http_client"].timeout.connect == 60.0
+    assert captured.transport_kwargs["http_client"].timeout.read == 60.0
 
     await conn.close()
 
@@ -1827,14 +1819,8 @@ async def test_connect_http_uses_default_timeouts_when_none() -> None:
         conn = McpServerConnection(config=config)
         await conn.connect()
 
-    # Streamable HTTP default: 30s for request timeout.
-    assert captured.transport_kwargs["timeout"] == 30, (
-        "transport timeout must default to 30 when config timeout is None"
-    )
-    # SDK default: 300s (5 min) for SSE event read.
-    assert captured.transport_kwargs["sse_read_timeout"] == 300, (
-        "transport sse_read_timeout must default to 300 when config timeout is None"
-    )
+    assert captured.transport_kwargs["http_client"].timeout.connect == 30.0
+    assert captured.transport_kwargs["http_client"].timeout.read == 300.0
 
 
 # ── HTTP transport: connection, headers, discovery ────────
@@ -1881,7 +1867,7 @@ def _mock_http_transport(
 
     mock_streamable_ctx = AsyncMock()
     mock_streamable_ctx.__aenter__ = AsyncMock(
-        return_value=(MagicMock(), MagicMock(), MagicMock()),
+        return_value=(MagicMock(), MagicMock()),
     )
     mock_streamable_ctx.__aexit__ = AsyncMock(return_value=False)
 
@@ -1920,7 +1906,7 @@ def _mock_http_transport(
         return mock_session
 
     with patch(
-        "omnigent.tools.mcp.streamablehttp_client",
+        "omnigent.tools.mcp.streamable_http_client",
         side_effect=_capturing_streamable_client,
     ):
         with patch(
@@ -1968,10 +1954,9 @@ async def test_http_connect_passes_headers_to_transport() -> None:
         conn = McpServerConnection(config=config)
         await conn.connect()
 
-    assert captured.transport_kwargs["headers"] == {
-        "Authorization": "Bearer tok_xyz",
-        "X-Custom": "value",
-    }
+    headers = captured.transport_kwargs["http_client"].headers
+    assert headers["Authorization"] == "Bearer tok_xyz"
+    assert headers["X-Custom"] == "value"
 
     await conn.close()
 
@@ -1992,8 +1977,7 @@ async def test_http_connect_passes_none_headers_when_empty() -> None:
         conn = McpServerConnection(config=config)
         await conn.connect()
 
-    # Empty dict is converted to None via `or None`.
-    assert captured.transport_kwargs["headers"] is None
+    assert "Authorization" not in captured.transport_kwargs["http_client"].headers
 
     await conn.close()
 
@@ -2049,7 +2033,7 @@ async def test_http_falls_back_to_sse_when_streamable_fails(transport: str) -> N
     mock_session.__aexit__ = AsyncMock(return_value=False)
 
     with patch(
-        "omnigent.tools.mcp.streamablehttp_client",
+        "omnigent.tools.mcp.streamable_http_client",
         side_effect=RuntimeError("server returned text/html, not application/json"),
     ) as mock_streamable:
         with patch(
@@ -2135,7 +2119,7 @@ async def test_http_call_tool_invokes_session() -> None:
         mock_result.content = [
             TextContent(type="text", text="HTTP result"),
         ]
-        mock_result.isError = False
+        mock_result.is_error = False
         captured.mock_session.call_tool.return_value = mock_result
 
         result = await conn.call_tool("http_tool", {"query": "test"})
@@ -2144,6 +2128,7 @@ async def test_http_call_tool_invokes_session() -> None:
     captured.mock_session.call_tool.assert_awaited_once_with(
         name="http_tool",
         arguments={"query": "test"},
+        allow_input_required=True,
     )
 
     await conn.close()
@@ -2168,7 +2153,7 @@ async def test_http_reconnect_on_connection_error() -> None:
         ok_result.content = [
             TextContent(type="text", text="recovered via HTTP"),
         ]
-        ok_result.isError = False
+        ok_result.is_error = False
 
         captured.mock_session.call_tool.side_effect = [
             ConnectionError("HTTP connection lost"),
@@ -2438,7 +2423,7 @@ async def test_call_tool_resets_breaker_on_success() -> None:
 
         ok_result = MagicMock()
         ok_result.content = [TextContent(type="text", text="ok")]
-        ok_result.isError = False
+        ok_result.is_error = False
 
         # 3 fails then 1 success (reconnect retries 3 per call).
         mock_session.call_tool = AsyncMock(
@@ -2702,21 +2687,8 @@ def _make_pool_mcp_tool(name: str) -> McpToolDef:
 def _make_input_required_result(
     input_requests: dict[str, Any] | None = None,
     request_state: str = "opaque_state",
-) -> CallToolResult:
-    """
-    Build a real ``CallToolResult`` with ``resultType: "input_required"``
-    via ``model_validate``, the same way the MCP SDK deserializes it
-    over the wire.
-
-    ``CallToolResult``'s parent ``Result`` has ``extra="allow"``, so
-    extra fields like ``resultType``, ``inputRequests``, and
-    ``requestState`` survive in ``model_extra``.
-
-    :param input_requests: The ``inputRequests`` map keyed by
-        server-assigned elicitation id.
-    :param request_state: The opaque ``requestState`` string.
-    :returns: A real ``CallToolResult`` with MRTR extras.
-    """
+) -> InputRequiredResult:
+    """Construct the MCP2 typed input-required response."""
     if input_requests is None:
         input_requests = {
             "eid_1": {
@@ -2739,10 +2711,8 @@ def _make_input_required_result(
                 },
             },
         }
-    return CallToolResult.model_validate(
+    return InputRequiredResult.model_validate(
         {
-            "content": [],
-            "isError": False,
             "resultType": "input_required",
             "inputRequests": input_requests,
             "requestState": request_state,
@@ -2751,33 +2721,10 @@ def _make_input_required_result(
 
 
 def test_call_tool_result_model_extra_preserves_mrtr_fields() -> None:
-    """
-    ``CallToolResult.model_validate`` preserves MRTR fields
-    (``resultType``, ``inputRequests``, ``requestState``) in
-    ``model_extra`` because the parent ``Result`` class has
-    ``extra="allow"``.
-
-    If this fails: the MCP SDK changed its Pydantic model config
-    to ``extra="forbid"`` or ``extra="ignore"``, which would silently
-    drop MRTR data and break the entire elicitation flow.
-    """
     result = _make_input_required_result()
-    extras = result.model_extra or {}
-    # resultType signals that the server needs user input.
-    assert extras.get("resultType") == "input_required", (
-        "resultType must survive in model_extra; if missing, the MCP SDK "
-        "is dropping extra fields and MRTR detection will silently fail"
-    )
-    # inputRequests carries the elicitation payloads keyed by id.
-    assert "eid_1" in extras.get("inputRequests", {}), (
-        "inputRequests must include the server's elicitation entries; "
-        "if empty, the elicitation UI will show nothing to the user"
-    )
-    # requestState must round-trip verbatim on retry.
-    assert extras.get("requestState") == "opaque_state", (
-        "requestState must be preserved exactly; the server uses it "
-        "to correlate the retry with the original request"
-    )
+    assert result.result_type == "input_required"
+    assert "eid_1" in result.input_requests
+    assert result.request_state == "opaque_state"
 
 
 @pytest.mark.asyncio
@@ -2796,7 +2743,7 @@ async def test_invoke_tool_raises_elicitation_on_input_required() -> None:
         input_requests={
             "eid_abc": {
                 "method": "elicitation/create",
-                "params": {"mode": "form", "message": "confirm deploy?"},
+                "params": {"mode": "form", "message": "confirm deploy?", "requestedSchema": {"type": "object", "properties": {}}},
             },
         },
         request_state="state_xyz",
@@ -2890,7 +2837,7 @@ async def test_call_tool_with_elicitation_returns_result() -> None:
     )
 
     with _mock_mcp_transport() as mock_session:
-        mock_session.send_request = AsyncMock(return_value=retry_result)
+        mock_session.call_tool = AsyncMock(return_value=retry_result)
 
         conn = McpServerConnection(config=config)
         await conn.connect()
@@ -2926,13 +2873,13 @@ async def test_call_tool_with_elicitation_raises_on_second_mrtr() -> None:
     # The retry returns yet another InputRequiredResult.
     second_mrtr = _make_input_required_result(
         input_requests={
-            "eid_2": {"method": "elicitation/create", "params": {"message": "round 2"}}
+            "eid_2": {"method": "elicitation/create", "params": {"mode": "form", "message": "round 2", "requestedSchema": {"type": "object", "properties": {}}}}
         },
         request_state="state_round2",
     )
 
     with _mock_mcp_transport() as mock_session:
-        mock_session.send_request = AsyncMock(return_value=second_mrtr)
+        mock_session.call_tool = AsyncMock(return_value=second_mrtr)
 
         conn = McpServerConnection(config=config)
         await conn.connect()
@@ -3047,7 +2994,7 @@ def test_is_connection_error_mcp_session_terminated_code() -> None:
     raised when the server restarted and lost the session id) must be
     classified as a connection error so the reconnect path runs.
     """
-    exc = McpError(
+    exc = McpError.from_error_data(
         ErrorData(
             code=32600,
             message="Session terminated",
@@ -3061,7 +3008,7 @@ def test_is_connection_error_mcp_session_terminated_message_only() -> None:
     The message match keeps classification correct if the SDK fixes the
     sign of the code (32600 is a typo of JSON-RPC's -32600).
     """
-    exc = McpError(
+    exc = McpError.from_error_data(
         ErrorData(
             code=-32600,
             message="Session terminated",
@@ -3075,7 +3022,7 @@ def test_is_connection_error_mcp_real_invalid_request_not_connection() -> None:
     A genuine -32600 invalid-request error with different message text is
     NOT a connection error.
     """
-    exc = McpError(
+    exc = McpError.from_error_data(
         ErrorData(
             code=-32600,
             message="Invalid Request",
@@ -3107,7 +3054,7 @@ async def test_managed_mcp_records_pr_before_result_formatting(
 @pytest.mark.asyncio()
 async def test_bounded_discovery_rejects_repeated_cursor() -> None:
     with _mock_mcp_transport() as session:
-        session.list_tools.return_value.nextCursor = "same-page"
+        session.list_tools.return_value.next_cursor = "same-page"
         conn = McpServerConnection(config=_make_http_config(), discovery_limit=501)
         try:
             with pytest.raises(ValueError, match="repeated a cursor"):

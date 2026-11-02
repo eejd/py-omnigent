@@ -89,9 +89,9 @@ async def execute_registry_tool(
             config.name,
             tool,
             conv.id,
-            result.isError,
+            result.is_error,
         )
-        return {"result": {"output": output}, "isError": result.isError}
+        return {"result": {"output": output}, "isError": result.is_error}
     except McpUpstreamError as exc:
         _logger.warning(
             "Registry MCP call failed service=%s tool=%s session=%s failure=%s http_status=%s",

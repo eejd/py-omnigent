@@ -17,6 +17,7 @@ from urllib.parse import urlencode, urlsplit
 from weakref import WeakValueDictionary
 
 import httpx
+import httpx2
 import yaml
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -46,7 +47,7 @@ def _upstream_error(exc: Exception) -> McpUpstreamError:
         if isinstance(error, ExceptionGroup):
             errors.extend(error.exceptions)
     for error in errors:
-        if isinstance(error, httpx.HTTPStatusError):
+        if isinstance(error, (httpx.HTTPStatusError, httpx2.HTTPStatusError)):
             status = error.response.status_code
             detail = {
                 401: "MCP service rejected the credential (HTTP 401). Reconnect the account.",
@@ -61,9 +62,9 @@ def _upstream_error(exc: Exception) -> McpUpstreamError:
                 "Check service configuration and availability.",
             )
             return McpUpstreamError(detail, kind="http", status_code=status)
-    if any(isinstance(error, (TimeoutError, httpx.TimeoutException)) for error in errors):
+    if any(isinstance(error, (TimeoutError, httpx.TimeoutException, httpx2.TimeoutException)) for error in errors):
         return McpUpstreamError("MCP request timed out; completion is unknown.", kind="timeout")
-    if any(isinstance(error, httpx.RequestError) for error in errors):
+    if any(isinstance(error, (httpx.RequestError, httpx2.RequestError)) for error in errors):
         return McpUpstreamError(
             "MCP transport failed; completion is unknown. Check service connectivity.",
             kind="transport",
@@ -323,14 +324,10 @@ class McpRegistry:
         try:
             async with asyncio.timeout(service.timeout):
                 async with (
-                    httpx.AsyncClient(
+                    httpx2.AsyncClient(
                         headers=headers, follow_redirects=False, timeout=service.timeout
                     ) as client,
-                    streamable_http_client(service.url, http_client=client) as (
-                        read,
-                        write,
-                        _,
-                    ),
+                    streamable_http_client(service.url, http_client=client) as (read, write),
                     ClientSession(read, write) as session,
                 ):
                     await session.initialize()
@@ -341,7 +338,7 @@ class McpRegistry:
                     for _ in range(100):
                         result = await session.list_tools(cursor=cursor)
                         tools.extend(t for t in result.tools if t.name in service.tools)
-                        cursor = result.nextCursor
+                        cursor = result.next_cursor
                         if not cursor:
                             return tools
                     raise ConnectionError("MCP tool catalog exceeded the pagination limit")

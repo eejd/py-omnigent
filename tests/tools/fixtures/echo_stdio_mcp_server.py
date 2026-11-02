@@ -15,7 +15,7 @@ reads/writes MCP protocol frames on stdin/stdout.
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer as FastMCP
 
 mcp = FastMCP("echo-test")
 
@@ -34,6 +34,11 @@ def echo(text: str) -> str:
     :returns: ``f"echo: {text}"``.
     """
     return f"echo: {text}"
+
+
+@mcp.tool()
+def add(a: int, b: int) -> int:
+    return a + b
 
 
 if __name__ == "__main__":
