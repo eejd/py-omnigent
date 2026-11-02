@@ -47,6 +47,7 @@ from mcp.types import (
     ElicitResult,
     ImageContent,
     InputRequiredResult,
+    PaginatedRequestParams,
     TextContent,
 )
 from mcp.types import Tool as McpToolDef
@@ -932,7 +933,7 @@ class McpServerConnection:
                 if cursor in seen_cursors:
                     raise ValueError("MCP discovery repeated a cursor")
                 seen_cursors.add(cursor)
-                tools_result = await self._session.list_tools(cursor=cursor)
+                tools_result = await self._session.list_tools(params=PaginatedRequestParams(cursor=cursor))
                 tools.extend(tools_result.tools)
             tools = tools[: self.discovery_limit]
         else:

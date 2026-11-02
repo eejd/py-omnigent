@@ -21,6 +21,7 @@ import httpx2
 import yaml
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import PaginatedRequestParams
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from omnigent.entities import ProviderConnection
@@ -321,11 +322,23 @@ class McpRegistry:
             raise ConnectionError("Tool is not allowed by the MCP registry")
         token = await self.token(service, user_id, app_state)
         headers = {"Authorization": f"Bearer {token}"} if token else {}
+        status_error: httpx2.HTTPStatusError | None = None
+
+        async def record_http_error(response: httpx2.Response) -> None:
+            # MCP2 converts failed POST responses into generic MCPError objects.
+            # Preserve their status without retaining or logging the response body.
+            nonlocal status_error
+            if response.request.method == "POST" and response.is_error:
+                status_error = httpx2.HTTPStatusError(
+                    "MCP HTTP error", request=response.request, response=response
+                )
+
         try:
             async with asyncio.timeout(service.timeout):
                 async with (
                     httpx2.AsyncClient(
-                        headers=headers, follow_redirects=False, timeout=service.timeout
+                        headers=headers, follow_redirects=False, timeout=service.timeout,
+                        event_hooks={"response": [record_http_error]},
                     ) as client,
                     streamable_http_client(service.url, http_client=client) as (read, write),
                     ClientSession(read, write) as session,
@@ -336,7 +349,9 @@ class McpRegistry:
                     tools = []
                     cursor = None
                     for _ in range(100):
-                        result = await session.list_tools(cursor=cursor)
+                        result = await session.list_tools(
+                            params=PaginatedRequestParams(cursor=cursor) if cursor else None
+                        )
                         tools.extend(t for t in result.tools if t.name in service.tools)
                         cursor = result.next_cursor
                         if not cursor:
@@ -345,7 +360,7 @@ class McpRegistry:
         except ConnectionError:
             raise
         except Exception as exc:  # noqa: BLE001 — transport errors may contain credentials
-            failure = _upstream_error(exc)
+            failure = _upstream_error(status_error or exc)
             _logger.warning(
                 "Registry MCP request failed service=%s tool=%s failure=%s http_status=%s",
                 service.id,

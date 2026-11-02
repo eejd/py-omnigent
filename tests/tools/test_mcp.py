@@ -16,7 +16,7 @@ import httpx2 as httpx
 import pytest
 from cachetools import TTLCache
 from mcp.shared.exceptions import MCPError as McpError
-from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, ImageContent, InputRequiredResult, TextContent
+from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, ImageContent, InputRequiredResult, PaginatedRequestParams, TextContent
 from mcp.types import Tool as McpToolDef
 
 from omnigent.spec.types import MCPServerConfig, RetryPolicy
@@ -3060,6 +3060,6 @@ async def test_bounded_discovery_rejects_repeated_cursor() -> None:
             with pytest.raises(ValueError, match="repeated a cursor"):
                 await conn.connect()
             assert session.list_tools.await_count == 2
-            session.list_tools.assert_awaited_with(cursor="same-page")
+            session.list_tools.assert_awaited_with(params=PaginatedRequestParams(cursor="same-page"))
         finally:
             await conn.close()
